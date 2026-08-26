@@ -12,6 +12,7 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "validator": "node validator/server.js",
+    "reset": "node validator/reset.js",
     "prepare": "husky"
   },
   "devDependencies": {

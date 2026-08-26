@@ -25,9 +25,11 @@
  *   open http://localhost:8787/
  *
  * Endpoints:
- *   GET /api/health                 -> { ok: true }
- *   GET /api/quests                 -> contents of data/K8sQuests.json
- *   GET /api/validate?questId=<id>  -> validation-result contract
+ *   GET  /api/health                 -> { ok: true }
+ *   GET  /api/quests                 -> contents of data/K8sQuests.json
+ *   GET  /api/validate?questId=<id>  -> validation-result contract
+ *   POST /api/reset/<chapterId>      -> delete the chapter's namespaces
+ *                                       (derived from quest data only)
  */
 
 'use strict';
@@ -271,6 +273,124 @@ const validators = {
     return pass(`Service "${spec.name}" is routing traffic.`);
   },
 
+  pod_ready: async (spec, ctx) => {
+    const pod = await ctx.get('pod', spec.name, spec.namespace);
+    if (!pod)
+      return fail(
+        `Pod "${spec.name}" was not found in namespace "${spec.namespace}".`,
+      );
+    const ready = (pod.status?.conditions || []).some(
+      (condition) => condition.type === 'Ready' && condition.status === 'True',
+    );
+    return ready
+      ? pass(`Pod "${spec.name}" is Ready.`)
+      : fail(
+          `Pod "${spec.name}" exists but is not Ready (phase: ${pod.status?.phase || 'unknown'}).`,
+        );
+  },
+
+  deployment_available: async (spec, ctx) => {
+    const deployment = await ctx.get('deployment', spec.name, spec.namespace);
+    if (!deployment) {
+      return fail(
+        `Deployment "${spec.name}" was not found in namespace "${spec.namespace}".`,
+      );
+    }
+    const available = (deployment.status?.conditions || []).some(
+      (condition) =>
+        condition.type === 'Available' && condition.status === 'True',
+    );
+    return available
+      ? pass(`Deployment "${spec.name}" is Available.`)
+      : fail(`Deployment "${spec.name}" is not reporting Available yet.`);
+  },
+
+  // True routing check: every selector entry on the Service must match the
+  // Deployment's Pod template labels, not just contain a magic value.
+  service_routes_to_deployment: async (spec, ctx) => {
+    const service = await ctx.get('service', spec.service, spec.namespace);
+    if (!service) {
+      return fail(
+        `Service "${spec.service}" was not found in namespace "${spec.namespace}".`,
+      );
+    }
+    const deployment = await ctx.get(
+      'deployment',
+      spec.deployment,
+      spec.namespace,
+    );
+    if (!deployment) {
+      return fail(
+        `Deployment "${spec.deployment}" was not found in namespace "${spec.namespace}".`,
+      );
+    }
+    const selector = service.spec?.selector || {};
+    const selectorKeys = Object.keys(selector);
+    if (selectorKeys.length === 0) {
+      return fail(`Service "${spec.service}" has no selector.`);
+    }
+    const labels = deployment.spec?.template?.metadata?.labels || {};
+    const mismatched = selectorKeys.filter(
+      (key) => labels[key] !== selector[key],
+    );
+    return mismatched.length === 0
+      ? pass(`Service "${spec.service}" selects the "${spec.deployment}" Pods.`)
+      : fail(
+          `Service "${spec.service}" selector does not match the "${spec.deployment}" Pod labels (mismatched: ${mismatched.join(', ')}).`,
+        );
+  },
+
+  service_has_ready_endpoints: async (spec, ctx) => {
+    const endpoints = await ctx.get('endpoints', spec.name, spec.namespace);
+    if (!endpoints) {
+      return fail(
+        `No Endpoints object found for Service "${spec.name}" in namespace "${spec.namespace}".`,
+      );
+    }
+    const readyAddresses = (endpoints.subsets || []).flatMap(
+      (subset) => subset.addresses || [],
+    );
+    return readyAddresses.length > 0
+      ? pass(
+          `Service "${spec.name}" has ${readyAddresses.length} ready endpoint(s).`,
+        )
+      : fail(`Service "${spec.name}" has no ready endpoints.`);
+  },
+
+  deployment_uses_configmap: async (spec, ctx) => {
+    const deployment = await ctx.get('deployment', spec.name, spec.namespace);
+    if (!deployment) {
+      return fail(
+        `Deployment "${spec.name}" was not found in namespace "${spec.namespace}".`,
+      );
+    }
+    const podSpec = deployment.spec?.template?.spec || {};
+    const containers = [
+      ...(podSpec.containers || []),
+      ...(podSpec.initContainers || []),
+    ];
+    const viaEnvFrom = containers.some((container) =>
+      (container.envFrom || []).some(
+        (source) => source.configMapRef?.name === spec.configmap,
+      ),
+    );
+    const viaEnv = containers.some((container) =>
+      (container.env || []).some(
+        (entry) => entry.valueFrom?.configMapKeyRef?.name === spec.configmap,
+      ),
+    );
+    const viaVolume = (podSpec.volumes || []).some(
+      (volume) => volume.configMap?.name === spec.configmap,
+    );
+    return viaEnvFrom || viaEnv || viaVolume
+      ? pass(
+          `Deployment "${spec.name}" consumes ConfigMap "${spec.configmap}".`,
+        )
+      : fail(
+          `Deployment "${spec.name}" does not consume ConfigMap "${spec.configmap}" (via envFrom, env or a volume).`,
+        );
+  },
+
   configmap_value: async (spec, ctx) => {
     const configMap = await ctx.get('configmap', spec.name, spec.namespace);
     if (!configMap) {
@@ -315,14 +435,80 @@ async function validateQuest(quest, ctx) {
   const completed =
     objectives.length > 0 && objectives.every((objective) => objective.passed);
   const failed = objectives.filter((objective) => !objective.passed);
+  const anyPassed = objectives.some((objective) => objective.passed);
   return {
     questId: quest.id,
     completed,
+    state: completed ? 'completed' : anyPassed ? 'partial' : 'pending',
     objectives,
     message: completed
       ? null
       : `${failed.length} objective(s) still need work in the cluster.`,
   };
+}
+
+// Chapter reset: the deletion list is derived strictly from the quest
+// data (the namespaces the chapter's validators reference), never from
+// the request — this endpoint must not become a generic kubectl proxy.
+function resetTargets(questData) {
+  const namespaces = new Set();
+  for (const quest of questData.quests || []) {
+    for (const objective of quest.objectives || []) {
+      const spec = objective.validator || {};
+      if (spec.type === 'namespace_exists' && spec.name) {
+        namespaces.add(spec.name);
+      }
+      if (spec.namespace) namespaces.add(spec.namespace);
+    }
+  }
+  return { namespaces: [...namespaces].sort() };
+}
+
+function makeKubectlDeleter(kubectlBin) {
+  return function deleteNamespace(namespace) {
+    const args = [
+      'delete',
+      'namespace',
+      namespace,
+      '--ignore-not-found',
+      '--wait=false',
+    ];
+    return new Promise((resolve, reject) => {
+      execFile(
+        kubectlBin,
+        args,
+        { timeout: KUBECTL_TIMEOUT_MS },
+        (error, stdout, stderr) => {
+          if (error) {
+            if (error.code === 'ENOENT') {
+              reject(
+                new Error(`kubectl not found (looked for "${kubectlBin}")`),
+              );
+              return;
+            }
+            const detail =
+              String(stderr).trim().split('\n')[0] || error.message;
+            reject(new Error(detail));
+            return;
+          }
+          resolve(String(stdout).trim());
+        },
+      );
+    });
+  };
+}
+
+async function resetChapter(chapterId, questData, deleteNamespace) {
+  if (!questData.chapter || questData.chapter.id !== chapterId) {
+    return { ok: false, status: 404, error: `Unknown chapter "${chapterId}".` };
+  }
+  const targets = resetTargets(questData);
+  const deleted = [];
+  for (const namespace of targets.namespaces) {
+    await deleteNamespace(namespace);
+    deleted.push(namespace);
+  }
+  return { ok: true, status: 200, chapterId, deletedNamespaces: deleted };
 }
 
 function sendJson(res, statusCode, body, corsOrigin) {
@@ -364,6 +550,7 @@ function serveStatic(req, res, urlPath) {
 
 function createServer(options) {
   const ctx = { get: makeKubectlGetter(options.kubectl) };
+  const deleteNamespace = makeKubectlDeleter(options.kubectl);
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -418,6 +605,52 @@ function createServer(options) {
       return;
     }
 
+    const resetMatch = url.pathname.match(/^\/api\/reset\/([A-Za-z0-9_-]+)$/);
+    if (resetMatch) {
+      if (req.method !== 'POST') {
+        sendJson(
+          res,
+          405,
+          { error: 'Use POST to reset a chapter.' },
+          corsOrigin,
+        );
+        return;
+      }
+      let questData;
+      try {
+        questData = loadQuests();
+      } catch (error) {
+        sendJson(
+          res,
+          500,
+          { error: `Cannot read quest data: ${error.message}` },
+          corsOrigin,
+        );
+        return;
+      }
+      try {
+        const result = await resetChapter(
+          resetMatch[1],
+          questData,
+          deleteNamespace,
+        );
+        sendJson(
+          res,
+          result.status,
+          result.ok
+            ? {
+                chapterId: result.chapterId,
+                deletedNamespaces: result.deletedNamespaces,
+              }
+            : { error: result.error },
+          corsOrigin,
+        );
+      } catch (error) {
+        sendJson(res, 500, { error: error.message }, corsOrigin);
+      }
+      return;
+    }
+
     if (options.apiOnly) {
       res.writeHead(404);
       res.end('Not found');
@@ -456,8 +689,11 @@ module.exports = {
   createServer,
   imageMatches,
   loadQuests,
+  makeKubectlDeleter,
   makeKubectlGetter,
   parseArgs,
+  resetChapter,
+  resetTargets,
   validateQuest,
   validators,
 };

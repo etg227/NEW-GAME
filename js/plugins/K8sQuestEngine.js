@@ -132,6 +132,10 @@
     return questResults[objectiveId];
   }
 
+  function refreshWorld() {
+    if (window.K8sWorldStateEngine) window.K8sWorldStateEngine.refresh();
+  }
+
   function showObjectives(quest) {
     if (!quest || !Array.isArray(quest.objectives)) return;
 
@@ -159,6 +163,7 @@
       if (quest.intro) addMessage(quest.intro);
     }
     showObjectives(quest);
+    refreshWorld();
     return true;
   }
 
@@ -222,6 +227,7 @@
       state.currentQuestId = null;
       addMessage('Chapter complete.');
     }
+    refreshWorld();
     return true;
   }
 
@@ -242,6 +248,7 @@
     if (isCompleted(result.questId)) {
       setObjectiveResults(result.questId, result.objectives || []);
       if (result.message) addMessage(result.message);
+      refreshWorld();
       return true;
     }
 
@@ -268,6 +275,7 @@
     }
 
     showObjectives(quest);
+    refreshWorld();
     return true;
   }
 
@@ -374,6 +382,7 @@
     }
     $gameSystem._k8sQuestState = null;
     ensureState();
+    if (window.K8sWorldStateEngine) window.K8sWorldStateEngine.reset();
     addMessage('Kubernetes quest progress has been reset.');
   }
 

@@ -17,12 +17,18 @@
         {
           "id": "namespace",
           "text": "Create a namespace named village.",
-          "validator": { "type": "namespace_exists", "name": "village" }
+          "validator": {
+            "type": "namespace_exists",
+            "name": "village"
+          }
         }
       ],
       "success": "A new boundary forms around the village. The rebuilding effort finally has a home.",
       "done": "The district you founded is thriving. Every ledger I file now has a home.",
-      "nextQuestId": "village-02-pod"
+      "nextQuestId": "village-02-pod",
+      "worldEffects": {
+        "completed": ["village_founded"]
+      }
     },
     {
       "id": "village-02-pod",
@@ -56,7 +62,10 @@
       ],
       "success": "Warm light spills from the inn. For the first time since the disaster, villagers gather indoors again.",
       "done": "The lantern you lit still burns. Travellers find the inn every night.",
-      "nextQuestId": "village-03-deployment"
+      "nextQuestId": "village-03-deployment",
+      "worldEffects": {
+        "completed": ["inn_lit"]
+      }
     },
     {
       "id": "village-03-deployment",
@@ -90,7 +99,10 @@
       ],
       "success": "The inn is now maintained by the village watch. If one worker falls, another can take its place.",
       "done": "The watch keeps the inn standing without me touching a thing. Fine work.",
-      "nextQuestId": "village-04-scale"
+      "nextQuestId": "village-04-scale",
+      "worldEffects": {
+        "completed": ["inn_managed"]
+      }
     },
     {
       "id": "village-04-scale",
@@ -114,7 +126,10 @@
       ],
       "success": "Three crews work in parallel. The queue disappears and the village square comes alive again.",
       "done": "Three crews, no queue. The night rush is just a story we tell now.",
-      "nextQuestId": "village-05-service"
+      "nextQuestId": "village-05-service",
+      "worldEffects": {
+        "completed": ["inn_scaled"]
+      }
     },
     {
       "id": "village-05-service",
@@ -139,7 +154,10 @@
       ],
       "success": "A permanent road sign appears in the square. Villagers can now find the inn no matter which crew is serving them.",
       "done": "The road holds. Doors change, the sign does not.",
-      "nextQuestId": "village-06-config"
+      "nextQuestId": "village-06-config",
+      "worldEffects": {
+        "completed": ["road_open"]
+      }
     },
     {
       "id": "village-06-config",
@@ -164,7 +182,10 @@
       ],
       "success": "The greeting returns to the inn ledger. The workers can change their message without being rebuilt.",
       "done": "The ledger is safe in the archive, outside the workers. As it should be.",
-      "nextQuestId": "village-07-boss"
+      "nextQuestId": "village-07-boss",
+      "worldEffects": {
+        "completed": ["ledger_restored"]
+      }
     },
     {
       "id": "village-07-boss",
@@ -173,7 +194,7 @@
       "role": "Village Chief",
       "summary": "Prove that the village stack is healthy as one complete system.",
       "intro": "The storm returns. This time the village must survive without a hero holding every piece together by hand.",
-      "hint": "Check desired replicas, ready replicas, Service routing and the configuration resources together.",
+      "hint": "The storm tests the whole system: ready replicas, a Service whose selector really matches the inn Pods with live endpoints, and a Deployment that actually consumes inn-config (try kubectl set env --from=configmap/inn-config deployment/inn -n village).",
       "objectives": [
         {
           "id": "deployment-ready",
@@ -186,31 +207,51 @@
           }
         },
         {
-          "id": "service-ready",
-          "text": "Keep inn-service available on port 80.",
+          "id": "deployment-available",
+          "text": "Keep the inn Deployment reporting itself Available.",
           "validator": {
-            "type": "service_exists",
+            "type": "deployment_available",
             "namespace": "village",
-            "name": "inn-service",
-            "port": 80,
-            "target": "inn"
+            "name": "inn"
           }
         },
         {
-          "id": "config-ready",
-          "text": "Keep inn-config with GREETING=WelcomeHome.",
+          "id": "service-routing",
+          "text": "Make sure inn-service really selects the inn Pods.",
           "validator": {
-            "type": "configmap_value",
+            "type": "service_routes_to_deployment",
             "namespace": "village",
-            "name": "inn-config",
-            "key": "GREETING",
-            "value": "WelcomeHome"
+            "service": "inn-service",
+            "deployment": "inn"
+          }
+        },
+        {
+          "id": "service-endpoints",
+          "text": "Keep inn-service backed by ready endpoints.",
+          "validator": {
+            "type": "service_has_ready_endpoints",
+            "namespace": "village",
+            "name": "inn-service"
+          }
+        },
+        {
+          "id": "config-used",
+          "text": "Make the inn Deployment consume the inn-config ledger.",
+          "validator": {
+            "type": "deployment_uses_configmap",
+            "namespace": "village",
+            "name": "inn",
+            "configmap": "inn-config"
           }
         }
       ],
       "success": "The storm passes. The village remains online. Chapter 1 is complete.",
       "done": "The village stood through the storm because of you. This chapter of our history is written.",
-      "nextQuestId": null
+      "nextQuestId": null,
+      "worldEffects": {
+        "started": ["storm_on"],
+        "completed": ["storm_off", "village_restored"]
+      }
     }
   ]
 }

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "comment": "Maps quest worldEffects names to concrete RPG Maker actions. Switches 11-18 are reserved for Kubernetes world state; wire map event pages to these switches in the editor.",
+  "effects": {
+    "village_founded": {
+      "switch": { "id": 11, "value": true }
+    },
+    "inn_lit": {
+      "switch": { "id": 12, "value": true }
+    },
+    "inn_managed": {
+      "switch": { "id": 13, "value": true }
+    },
+    "inn_scaled": {
+      "switch": { "id": 14, "value": true }
+    },
+    "road_open": {
+      "switch": { "id": 15, "value": true }
+    },
+    "ledger_restored": {
+      "switch": { "id": 16, "value": true }
+    },
+    "village_restored": {
+      "switch": { "id": 17, "value": true }
+    },
+    "storm_on": {
+      "switch": { "id": 18, "value": true },
+      "weather": { "type": "storm", "power": 7 }
+    },
+    "storm_off": {
+      "switch": { "id": 18, "value": false },
+      "weather": { "type": "none", "power": 0 }
+    }
+  }
+}

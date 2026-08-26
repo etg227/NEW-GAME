@@ -9,6 +9,7 @@ const vm = require('vm');
 
 const PLUGIN_DIR = path.join(__dirname, '..', 'js', 'plugins');
 const QUESTS_FILE = path.join(__dirname, '..', 'data', 'K8sQuests.json');
+const EFFECTS_FILE = path.join(__dirname, '..', 'data', 'K8sWorldEffects.json');
 
 function createSandbox({ search = '' } = {}) {
   const messages = [];
@@ -31,6 +32,27 @@ function createSandbox({ search = '' } = {}) {
       messages.push(text);
     },
   };
+  sandbox.$gameSwitches = {
+    _values: {},
+    setValue(id, value) {
+      this._values[id] = value;
+    },
+    value(id) {
+      return !!this._values[id];
+    },
+  };
+  sandbox.$gameScreen = {
+    weatherCalls: [],
+    changeWeather(type, power, duration) {
+      this.weatherCalls.push({ type, power, duration });
+    },
+  };
+  sandbox.AudioManager = {
+    bgmCalls: [],
+    playBgm(args) {
+      this.bgmCalls.push(args);
+    },
+  };
 
   vm.createContext(sandbox);
   return { sandbox, messages };
@@ -45,18 +67,28 @@ function loadQuestData() {
   return JSON.parse(fs.readFileSync(QUESTS_FILE, 'utf8'));
 }
 
-// Boots a sandbox with the quest engine loaded, quest data injected and a
-// fresh $gameSystem, mirroring what DataManager.createGameObjects produces.
+function loadEffectData() {
+  return JSON.parse(fs.readFileSync(EFFECTS_FILE, 'utf8'));
+}
+
+// Boots a sandbox with the quest and world-state engines loaded, data
+// injected and a fresh $gameSystem, mirroring what
+// DataManager.createGameObjects produces.
 function bootQuestEngine({ search = '' } = {}) {
   const { sandbox, messages } = createSandbox({ search });
   loadPlugin(sandbox, 'K8sQuestEngine.js');
+  loadPlugin(sandbox, 'K8sWorldStateEngine.js');
   sandbox.$dataK8sQuests = loadQuestData();
+  sandbox.$dataK8sWorldEffects = loadEffectData();
   sandbox.$gameSystem = new sandbox.Game_System();
   sandbox.$gameSystem.initialize();
   return {
     sandbox,
     messages,
     engine: sandbox.K8sQuestEngine,
+    world: sandbox.K8sWorldStateEngine,
+    switches: sandbox.$gameSwitches,
+    screen: sandbox.$gameScreen,
     state: () => sandbox.$gameSystem._k8sQuestState,
     runPluginCommand(command, args) {
       const interpreter = new sandbox.Game_Interpreter();
@@ -65,4 +97,10 @@ function bootQuestEngine({ search = '' } = {}) {
   };
 }
 
-module.exports = { bootQuestEngine, createSandbox, loadPlugin, loadQuestData };
+module.exports = {
+  bootQuestEngine,
+  createSandbox,
+  loadEffectData,
+  loadPlugin,
+  loadQuestData,
+};

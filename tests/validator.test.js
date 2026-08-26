@@ -280,3 +280,262 @@ test('parseArgs defaults to loopback and collects --allow-origin flags', () => {
   assert.equal(custom.port, 9000);
   assert.deepEqual(custom.allowOrigins, ['null', 'https://game.example.com']);
 });
+
+test('pod_ready requires a True Ready condition', async () => {
+  const { validators } = require('../validator/server');
+  const readyPod = {
+    status: {
+      phase: 'Running',
+      conditions: [{ type: 'Ready', status: 'True' }],
+    },
+  };
+  const notReadyPod = {
+    status: {
+      phase: 'Pending',
+      conditions: [{ type: 'Ready', status: 'False' }],
+    },
+  };
+  const spec = { namespace: 'village', name: 'inn-lantern' };
+  assert.equal(
+    (
+      await validators.pod_ready(
+        spec,
+        fakeCluster({ 'pod/village/inn-lantern': readyPod }),
+      )
+    ).passed,
+    true,
+  );
+  const result = await validators.pod_ready(
+    spec,
+    fakeCluster({ 'pod/village/inn-lantern': notReadyPod }),
+  );
+  assert.equal(result.passed, false);
+  assert.match(result.message, /not Ready/);
+});
+
+test('deployment_available reads the Available condition', async () => {
+  const { validators } = require('../validator/server');
+  const available = {
+    status: { conditions: [{ type: 'Available', status: 'True' }] },
+  };
+  const notAvailable = {
+    status: { conditions: [{ type: 'Available', status: 'False' }] },
+  };
+  const spec = { namespace: 'village', name: 'inn' };
+  assert.equal(
+    (
+      await validators.deployment_available(
+        spec,
+        fakeCluster({ 'deployment/village/inn': available }),
+      )
+    ).passed,
+    true,
+  );
+  assert.equal(
+    (
+      await validators.deployment_available(
+        spec,
+        fakeCluster({ 'deployment/village/inn': notAvailable }),
+      )
+    ).passed,
+    false,
+  );
+});
+
+test('service_routes_to_deployment matches selector against template labels', async () => {
+  const { validators } = require('../validator/server');
+  const deployment = {
+    spec: { template: { metadata: { labels: { app: 'inn', tier: 'web' } } } },
+  };
+  const spec = {
+    namespace: 'village',
+    service: 'inn-service',
+    deployment: 'inn',
+  };
+
+  const matching = { spec: { selector: { app: 'inn' } } };
+  assert.equal(
+    (
+      await validators.service_routes_to_deployment(
+        spec,
+        fakeCluster({
+          'service/village/inn-service': matching,
+          'deployment/village/inn': deployment,
+        }),
+      )
+    ).passed,
+    true,
+  );
+
+  const mismatched = { spec: { selector: { app: 'tavern' } } };
+  const bad = await validators.service_routes_to_deployment(
+    spec,
+    fakeCluster({
+      'service/village/inn-service': mismatched,
+      'deployment/village/inn': deployment,
+    }),
+  );
+  assert.equal(bad.passed, false);
+  assert.match(bad.message, /mismatched: app/);
+
+  const empty = { spec: { selector: {} } };
+  const noSelector = await validators.service_routes_to_deployment(
+    spec,
+    fakeCluster({
+      'service/village/inn-service': empty,
+      'deployment/village/inn': deployment,
+    }),
+  );
+  assert.equal(noSelector.passed, false);
+  assert.match(noSelector.message, /no selector/);
+});
+
+test('service_has_ready_endpoints requires at least one ready address', async () => {
+  const { validators } = require('../validator/server');
+  const spec = { namespace: 'village', name: 'inn-service' };
+  const withAddresses = {
+    subsets: [{ addresses: [{ ip: '10.0.0.5' }, { ip: '10.0.0.6' }] }],
+  };
+  const onlyNotReady = {
+    subsets: [{ notReadyAddresses: [{ ip: '10.0.0.5' }] }],
+  };
+
+  const ok = await validators.service_has_ready_endpoints(
+    spec,
+    fakeCluster({
+      'endpoints/village/inn-service': withAddresses,
+    }),
+  );
+  assert.equal(ok.passed, true);
+  assert.match(ok.message, /2 ready endpoint/);
+
+  assert.equal(
+    (
+      await validators.service_has_ready_endpoints(
+        spec,
+        fakeCluster({
+          'endpoints/village/inn-service': onlyNotReady,
+        }),
+      )
+    ).passed,
+    false,
+  );
+  assert.equal(
+    (await validators.service_has_ready_endpoints(spec, fakeCluster({})))
+      .passed,
+    false,
+  );
+});
+
+test('deployment_uses_configmap accepts envFrom, env valueFrom and volumes', async () => {
+  const { validators } = require('../validator/server');
+  const spec = { namespace: 'village', name: 'inn', configmap: 'inn-config' };
+  const key = 'deployment/village/inn';
+  const make = (podSpec) => ({ spec: { template: { spec: podSpec } } });
+
+  const viaEnvFrom = make({
+    containers: [{ envFrom: [{ configMapRef: { name: 'inn-config' } }] }],
+  });
+  const viaEnv = make({
+    containers: [
+      {
+        env: [
+          {
+            name: 'GREETING',
+            valueFrom: {
+              configMapKeyRef: { name: 'inn-config', key: 'GREETING' },
+            },
+          },
+        ],
+      },
+    ],
+  });
+  const viaVolume = make({
+    containers: [{}],
+    volumes: [{ name: 'cfg', configMap: { name: 'inn-config' } }],
+  });
+  const unrelated = make({
+    containers: [{ envFrom: [{ configMapRef: { name: 'other-config' } }] }],
+  });
+
+  assert.equal(
+    (
+      await validators.deployment_uses_configmap(
+        spec,
+        fakeCluster({ [key]: viaEnvFrom }),
+      )
+    ).passed,
+    true,
+  );
+  assert.equal(
+    (
+      await validators.deployment_uses_configmap(
+        spec,
+        fakeCluster({ [key]: viaEnv }),
+      )
+    ).passed,
+    true,
+  );
+  assert.equal(
+    (
+      await validators.deployment_uses_configmap(
+        spec,
+        fakeCluster({ [key]: viaVolume }),
+      )
+    ).passed,
+    true,
+  );
+  assert.equal(
+    (
+      await validators.deployment_uses_configmap(
+        spec,
+        fakeCluster({ [key]: unrelated }),
+      )
+    ).passed,
+    false,
+  );
+});
+
+test('validateQuest reports state pending, partial or completed', async () => {
+  const quest = {
+    id: 'state-check',
+    objectives: [
+      { id: 'a', validator: { type: 'namespace_exists', name: 'village' } },
+      { id: 'b', validator: { type: 'namespace_exists', name: 'castle' } },
+    ],
+  };
+  const none = await validateQuest(quest, fakeCluster({}));
+  assert.equal(none.state, 'pending');
+  const some = await validateQuest(
+    quest,
+    fakeCluster({ 'namespace//village': {} }),
+  );
+  assert.equal(some.state, 'partial');
+  const all = await validateQuest(
+    quest,
+    fakeCluster({ 'namespace//village': {}, 'namespace//castle': {} }),
+  );
+  assert.equal(all.state, 'completed');
+});
+
+test('resetTargets derives only the namespaces the chapter really uses', () => {
+  const { resetTargets } = require('../validator/server');
+  assert.deepEqual(resetTargets(loadQuests()).namespaces, ['village']);
+});
+
+test('resetChapter refuses unknown chapters and deletes only derived namespaces', async () => {
+  const { resetChapter } = require('../validator/server');
+  const deleted = [];
+  const fakeDelete = async (namespace) => deleted.push(namespace);
+  const questData = loadQuests();
+
+  const wrong = await resetChapter('chapter-99', questData, fakeDelete);
+  assert.equal(wrong.ok, false);
+  assert.equal(wrong.status, 404);
+  assert.deepEqual(deleted, []);
+
+  const right = await resetChapter(questData.chapter.id, questData, fakeDelete);
+  assert.equal(right.ok, true);
+  assert.deepEqual(right.deletedNamespaces, ['village']);
+  assert.deepEqual(deleted, ['village']);
+});

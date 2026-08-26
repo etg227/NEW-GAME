@@ -45,7 +45,9 @@ Each quest belongs to one NPC in the village. Everyone else will point you to wh
 | 4 | The Night Rush                | Maya, Inn Steward      | Scaling                    |
 | 5 | Open the Road                 | Carl, Roadwright       | Services                   |
 | 6 | The Missing Ledger            | Lena, Archivist        | ConfigMaps                 |
-| 7 | Boss: Restore the Village     | Reno, Village Chief    | Integrated health check    |
+| 7 | Boss: Restore the Village     | Reno, Village Chief    | Real health: ready replicas, Service routing + endpoints, consuming the ConfigMap |
+
+Quest progress feeds back into the world: completing a quest flips its world switch (lights, roads, celebration), and the boss quest literally starts a storm that only clears when the whole stack is healthy. See **World effects** below.
 
 ## Architecture
 
@@ -54,6 +56,7 @@ RPG Maker MV game (browser)
     |
     +-- K8sQuestEngine ......... story, quest state in save data,
     |                            validation-result contract
+    +-- K8sWorldStateEngine .... maps quest state to switches/weather/BGM
     +-- K8sValidatorClient ..... fetches results from the sidecar
     +-- NpcK8sPluginCommand .... NPC bridge; legacy backend compatibility
     |
@@ -70,11 +73,41 @@ Game progression is owned by the game itself. The validator only reports a small
 K8sQuestEngine.applyValidationResult({
   questId: 'village-04-scale',
   completed: true,
+  state: 'completed', // 'pending' | 'partial' | 'completed'
   objectives: [{ id: 'replicas', passed: true }],
 });
 ```
 
 Results are only accepted for the quest that is currently active — an external component cannot complete the story out of order. Quest progress is stored in normal RPG Maker save files.
+
+### World effects
+
+Quests declare what their progress does to the world in `data/K8sQuests.json`:
+
+```json
+"worldEffects": {
+  "started": ["storm_on"],
+  "partial": ["inn_dim"],
+  "completed": ["storm_off", "village_restored"]
+}
+```
+
+`js/plugins/K8sWorldStateEngine.js` recomputes these effects from quest state — idempotently, on every state change and map start, so loaded saves always show the right world. Effect names map to concrete RPG Maker actions in `data/K8sWorldEffects.json` (game switches, weather, BGM). Phases are cumulative, so a quest's `completed` effects can override its `started` ones — that is how the boss storm clears.
+
+Switches 11–18 are reserved for Kubernetes world state (named in the editor):
+
+| Switch | Meaning              | Set by quest              |
+| ------ | -------------------- | ------------------------- |
+| 11     | Village Founded      | village-01-namespace      |
+| 12     | Inn Lit              | village-02-pod            |
+| 13     | Inn Managed          | village-03-deployment     |
+| 14     | Inn Scaled           | village-04-scale          |
+| 15     | Road Open            | village-05-service        |
+| 16     | Ledger Restored      | village-06-config         |
+| 17     | Village Restored     | village-07-boss           |
+| 18     | Storm Active         | village-07-boss (started) |
+
+To make a map react (a lamp lights, villagers appear, a road opens), give the event a second page in the RPG Maker editor whose page condition is the matching switch — no plugin code needed. Weather and BGM are driven directly by the engine.
 
 ### Quest definitions
 
@@ -105,14 +138,39 @@ node validator/server.js [--port 8787] [--host 127.0.0.1] [--kubectl /path/to/ku
 
 Security defaults: the server binds to `127.0.0.1` only, and cross-origin API calls are accepted solely from loopback origins (`localhost` / `127.0.0.1` on any port). Pass `--host 0.0.0.0` only when you deliberately want other machines to reach it, and `--allow-origin` to whitelist additional origins — e.g. `--allow-origin null` if you open the game straight from disk via `file://` instead of letting the sidecar serve it.
 
-| Endpoint                       | Purpose                                  |
-| ------------------------------ | ---------------------------------------- |
-| `GET /api/health`              | liveness check                           |
-| `GET /api/quests`              | quest definitions                        |
-| `GET /api/validate?questId=…`  | run the quest's checks, return contract  |
-| `GET /`                        | the game itself (unless `--api-only`)    |
+| Endpoint                        | Purpose                                  |
+| ------------------------------- | ---------------------------------------- |
+| `GET /api/health`               | liveness check                           |
+| `GET /api/quests`               | quest definitions                        |
+| `GET /api/validate?questId=…`   | run the quest's checks, return contract  |
+| `POST /api/reset/<chapterId>`   | delete the chapter's namespaces          |
+| `GET /`                         | the game itself (unless `--api-only`)    |
 
-Supported validator types: `namespace_exists`, `pod_exists`, `container_port`, `deployment_exists`, `deployment_replicas`, `deployment_ready_replicas`, `service_exists`, `configmap_value`.
+Supported validator types:
+
+| Type | Checks |
+| ---- | ------ |
+| `namespace_exists` | namespace is present |
+| `pod_exists` | Pod present, optionally running a given image |
+| `pod_ready` | Pod condition `Ready=True` |
+| `container_port` | a container on the Pod exposes the port |
+| `deployment_exists` | Deployment present, optionally with image |
+| `deployment_replicas` | desired replica count matches |
+| `deployment_ready_replicas` | `status.readyReplicas` matches |
+| `deployment_available` | condition `Available=True` |
+| `deployment_uses_configmap` | template consumes the ConfigMap via `envFrom`, `env valueFrom` or a volume |
+| `service_exists` | Service present with port/selector value |
+| `service_routes_to_deployment` | every selector entry matches the Deployment's Pod template labels |
+| `service_has_ready_endpoints` | the Service's Endpoints have ready addresses |
+| `configmap_value` | ConfigMap holds `key=value` |
+
+### Resetting between playthroughs
+
+```bash
+npm run reset             # or: node validator/reset.js --dry-run
+```
+
+Deletes only the namespaces the chapter's quest validators reference (for Chapter 1: `namespace/village`, which takes the pod, deployment, service and configmap with it). The same operation is available as `POST /api/reset/chapter-01`. The deletion list is derived strictly from `data/K8sQuests.json` — the endpoint takes no resource names from the request, so it cannot be used as a generic kubectl proxy. In-game progress is reset separately with `?questDev=1` + `K8sQuest reset`. (Roadmap: label game-managed resources with `k8s-isekai.io/managed` so cleanup can be label-scoped once quests span shared namespaces.)
 
 The kubeconfig never reaches the browser; the game only ever sees pass/fail results.
 
@@ -148,11 +206,14 @@ Tests run on Node's built-in test runner with a small RPG Maker stub (`tests/mv-
 Project layout:
 
 ```text
-data/K8sQuests.json            quest and validator definitions
+data/K8sQuests.json            quest, validator and world-effect definitions
+data/K8sWorldEffects.json      effect name -> switch/weather/BGM mapping
 js/plugins/K8sQuestEngine.js   quest state machine and NPC routing
+js/plugins/K8sWorldStateEngine.js quest state -> world state
 js/plugins/K8sValidatorClient.js  HTTP client for the sidecar
 js/plugins/NpcK8sPluginCommand.js NPC bridge + legacy compatibility
 validator/server.js            independent Kubernetes validator
+validator/reset.js             safe chapter cleanup (npm run reset)
 tests/                         unit tests
 python_tools/                  content-generation notebooks
 design/character_generator/    RPG Maker character generator presets
