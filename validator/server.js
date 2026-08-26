@@ -9,7 +9,15 @@
  * Zero runtime dependencies — only Node.js and a working kubectl.
  *
  * Usage:
- *   node validator/server.js [--port 8787] [--kubectl kubectl] [--api-only]
+ *   node validator/server.js [--port 8787] [--host 127.0.0.1]
+ *                            [--kubectl kubectl] [--api-only]
+ *                            [--allow-origin <origin>]...
+ *
+ * Security defaults: the server binds to 127.0.0.1 only, and cross-origin
+ * API calls are accepted solely from loopback origins (localhost/127.0.0.1
+ * on any port). Use --host to expose it deliberately and --allow-origin to
+ * whitelist additional origins (e.g. --allow-origin null for a game opened
+ * straight from disk via file://).
  *
  * By default the server also serves the game itself from the repository
  * root, so the whole independent mode is just:
@@ -50,17 +58,38 @@ const MIME_TYPES = {
 };
 
 function parseArgs(argv) {
-  const options = { port: 8787, kubectl: 'kubectl', apiOnly: false };
+  const options = {
+    port: 8787,
+    host: '127.0.0.1',
+    kubectl: 'kubectl',
+    apiOnly: false,
+    allowOrigins: [],
+  };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--port') options.port = Number(argv[++i]);
+    else if (argv[i] === '--host') options.host = argv[++i];
     else if (argv[i] === '--kubectl') options.kubectl = argv[++i];
     else if (argv[i] === '--api-only') options.apiOnly = true;
+    else if (argv[i] === '--allow-origin') options.allowOrigins.push(argv[++i]);
     else {
       console.error(`Unknown option: ${argv[i]}`);
       process.exit(1);
     }
   }
   return options;
+}
+
+// Cross-origin callers are only accepted from loopback origins by default;
+// anything else (including the "null" origin of file:// pages) must be
+// allowed explicitly with --allow-origin. Same-origin requests carry no
+// Origin header and need no CORS response at all.
+const LOOPBACK_ORIGIN_RE =
+  /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
+function corsOriginFor(origin, allowOrigins) {
+  if (!origin) return null;
+  if ((allowOrigins || []).includes(origin)) return origin;
+  return LOOPBACK_ORIGIN_RE.test(origin) ? origin : null;
 }
 
 function loadQuests() {
@@ -296,12 +325,16 @@ async function validateQuest(quest, ctx) {
   };
 }
 
-function sendJson(res, statusCode, body) {
-  res.writeHead(statusCode, {
+function sendJson(res, statusCode, body, corsOrigin) {
+  const headers = {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
     'Cache-Control': 'no-store',
-  });
+  };
+  if (corsOrigin) {
+    headers['Access-Control-Allow-Origin'] = corsOrigin;
+    headers['Vary'] = 'Origin';
+  }
+  res.writeHead(statusCode, headers);
   res.end(JSON.stringify(body));
 }
 
@@ -334,19 +367,23 @@ function createServer(options) {
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const corsOrigin = corsOriginFor(req.headers.origin, options.allowOrigins);
 
     if (url.pathname === '/api/health') {
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true }, corsOrigin);
       return;
     }
 
     if (url.pathname === '/api/quests') {
       try {
-        sendJson(res, 200, loadQuests());
+        sendJson(res, 200, loadQuests(), corsOrigin);
       } catch (error) {
-        sendJson(res, 500, {
-          error: `Cannot read quest data: ${error.message}`,
-        });
+        sendJson(
+          res,
+          500,
+          { error: `Cannot read quest data: ${error.message}` },
+          corsOrigin,
+        );
       }
       return;
     }
@@ -359,17 +396,25 @@ function createServer(options) {
           (entry) => entry.id === questId,
         );
       } catch (error) {
-        sendJson(res, 500, {
-          error: `Cannot read quest data: ${error.message}`,
-        });
+        sendJson(
+          res,
+          500,
+          { error: `Cannot read quest data: ${error.message}` },
+          corsOrigin,
+        );
         return;
       }
       if (!quest) {
-        sendJson(res, 404, { error: `Unknown questId "${questId}".` });
+        sendJson(
+          res,
+          404,
+          { error: `Unknown questId "${questId}".` },
+          corsOrigin,
+        );
         return;
       }
       const result = await validateQuest(quest, ctx);
-      sendJson(res, 200, result);
+      sendJson(res, 200, result, corsOrigin);
       return;
     }
 
@@ -386,14 +431,19 @@ function createServer(options) {
 function main() {
   const options = parseArgs(process.argv.slice(2));
   const server = createServer(options);
-  server.listen(options.port, () => {
+  server.listen(options.port, options.host, () => {
     console.log(
-      `Kubernetes Isekai validator listening on http://localhost:${options.port}`,
+      `Kubernetes Isekai validator listening on http://${options.host}:${options.port}`,
     );
     if (!options.apiOnly) {
-      console.log(`Game served at http://localhost:${options.port}/`);
+      console.log(`Game served at http://${options.host}:${options.port}/`);
     }
     console.log(`Using kubectl binary: ${options.kubectl}`);
+    if (options.host !== '127.0.0.1' && options.host !== 'localhost') {
+      console.warn(
+        'Warning: the validator is reachable from other machines and exposes cluster state; only do this on a network you trust.',
+      );
+    }
   });
 }
 
@@ -402,10 +452,12 @@ if (require.main === module) {
 }
 
 module.exports = {
+  corsOriginFor,
   createServer,
   imageMatches,
   loadQuests,
   makeKubectlGetter,
+  parseArgs,
   validateQuest,
   validators,
 };

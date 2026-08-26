@@ -229,3 +229,54 @@ test('every validator type used in K8sQuests.json is implemented', () => {
     );
   }
 });
+
+test('corsOriginFor only reflects loopback origins by default', () => {
+  const { corsOriginFor } = require('../validator/server');
+  assert.equal(corsOriginFor(undefined, []), null);
+  assert.equal(
+    corsOriginFor('http://localhost:8080', []),
+    'http://localhost:8080',
+  );
+  assert.equal(
+    corsOriginFor('http://127.0.0.1:3000', []),
+    'http://127.0.0.1:3000',
+  );
+  assert.equal(corsOriginFor('https://localhost', []), 'https://localhost');
+  assert.equal(corsOriginFor('http://evil.example.com', []), null);
+  assert.equal(corsOriginFor('http://localhost.evil.com', []), null);
+  assert.equal(corsOriginFor('null', []), null);
+});
+
+test('corsOriginFor honours an explicit allowlist', () => {
+  const { corsOriginFor } = require('../validator/server');
+  assert.equal(corsOriginFor('null', ['null']), 'null');
+  assert.equal(
+    corsOriginFor('https://game.example.com', ['https://game.example.com']),
+    'https://game.example.com',
+  );
+  assert.equal(
+    corsOriginFor('https://other.example.com', ['https://game.example.com']),
+    null,
+  );
+});
+
+test('parseArgs defaults to loopback and collects --allow-origin flags', () => {
+  const { parseArgs } = require('../validator/server');
+  const defaults = parseArgs([]);
+  assert.equal(defaults.host, '127.0.0.1');
+  assert.deepEqual(defaults.allowOrigins, []);
+
+  const custom = parseArgs([
+    '--host',
+    '0.0.0.0',
+    '--port',
+    '9000',
+    '--allow-origin',
+    'null',
+    '--allow-origin',
+    'https://game.example.com',
+  ]);
+  assert.equal(custom.host, '0.0.0.0');
+  assert.equal(custom.port, 9000);
+  assert.deepEqual(custom.allowOrigins, ['null', 'https://game.example.com']);
+});

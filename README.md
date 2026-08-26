@@ -100,8 +100,10 @@ The sidecar and the game read the same file, so story and validation cannot drif
 `validator/server.js` needs only Node and `kubectl`:
 
 ```bash
-node validator/server.js [--port 8787] [--kubectl /path/to/kubectl] [--api-only]
+node validator/server.js [--port 8787] [--host 127.0.0.1] [--kubectl /path/to/kubectl] [--api-only] [--allow-origin <origin>]...
 ```
+
+Security defaults: the server binds to `127.0.0.1` only, and cross-origin API calls are accepted solely from loopback origins (`localhost` / `127.0.0.1` on any port). Pass `--host 0.0.0.0` only when you deliberately want other machines to reach it, and `--allow-origin` to whitelist additional origins — e.g. `--allow-origin null` if you open the game straight from disk via `file://` instead of letting the sidecar serve it.
 
 | Endpoint                       | Purpose                                  |
 | ------------------------------ | ---------------------------------------- |
@@ -158,9 +160,9 @@ design/character_generator/    RPG Maker character generator presets
 
 ## Origins
 
-This project grew out of a team academic project (Higher Diploma in Cloud and Data Centre Administration): a Web RPG connected to an AWS SAM grading backend with Kubernetes test rules, developed under supervisor guidance:
+This project grew out of a team academic project (Higher Diploma in Cloud and Data Centre Administration). The game client — maps, events, characters and story world — was built by the student team. It originally connected to an AWS SAM grading backend with Kubernetes test rules, developed separately under supervisor guidance:
 
 - Grader/backend: https://github.com/wongcyrus/k8s-grader
 - Kubernetes game rules: https://github.com/wongcyrus/k8s-game-rule
 
-The legacy mode is kept so the original prototype can still be demonstrated. Everything else in this repository is an independent game-side implementation that runs without that backend.
+This repository continues the team's game client and extends it with an independent quest engine and local validator, so the game now runs without that backend. The legacy mode is kept so the original prototype can still be demonstrated.
