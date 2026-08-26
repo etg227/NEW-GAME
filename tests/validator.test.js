@@ -1,0 +1,231 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const {
+  validators,
+  validateQuest,
+  imageMatches,
+  loadQuests,
+} = require('../validator/server');
+
+// Fake kubectl context: resources keyed by "kind/namespace/name".
+function fakeCluster(resources) {
+  return {
+    get: async (kind, name, namespace) => {
+      const key = `${kind}/${namespace || ''}/${name}`;
+      if (resources[key] instanceof Error) throw resources[key];
+      return resources[key] || null;
+    },
+  };
+}
+
+test('imageMatches accepts bare names, tags and digests', () => {
+  assert.ok(imageMatches(['nginx'], 'nginx'));
+  assert.ok(imageMatches(['nginx:1.25'], 'nginx'));
+  assert.ok(imageMatches(['nginx@sha256:abc'], 'nginx'));
+  assert.ok(!imageMatches(['nginx-unprivileged'], 'nginx'));
+  assert.ok(!imageMatches([], 'nginx'));
+});
+
+test('namespace_exists passes and fails correctly', async () => {
+  const ctx = fakeCluster({
+    'namespace//village': { metadata: { name: 'village' } },
+  });
+  assert.equal(
+    (await validators.namespace_exists({ name: 'village' }, ctx)).passed,
+    true,
+  );
+  assert.equal(
+    (await validators.namespace_exists({ name: 'missing' }, ctx)).passed,
+    false,
+  );
+});
+
+test('pod_exists checks the image when one is required', async () => {
+  const pod = { spec: { containers: [{ image: 'nginx:1.25' }] } };
+  const ctx = fakeCluster({ 'pod/village/inn-lantern': pod });
+  const spec = { namespace: 'village', name: 'inn-lantern', image: 'nginx' };
+  assert.equal((await validators.pod_exists(spec, ctx)).passed, true);
+  const wrong = { ...spec, image: 'httpd' };
+  assert.equal((await validators.pod_exists(wrong, ctx)).passed, false);
+});
+
+test('container_port finds ports across containers', async () => {
+  const pod = {
+    spec: {
+      containers: [
+        { ports: [{ containerPort: 8080 }] },
+        { ports: [{ containerPort: 80 }] },
+      ],
+    },
+  };
+  const ctx = fakeCluster({ 'pod/village/inn-lantern': pod });
+  const spec = { namespace: 'village', pod: 'inn-lantern', port: 80 };
+  assert.equal((await validators.container_port(spec, ctx)).passed, true);
+  assert.equal(
+    (await validators.container_port({ ...spec, port: 443 }, ctx)).passed,
+    false,
+  );
+});
+
+test('deployment_replicas compares desired replicas', async () => {
+  const deployment = { spec: { replicas: 3 } };
+  const ctx = fakeCluster({ 'deployment/village/inn': deployment });
+  const spec = { namespace: 'village', name: 'inn', count: 3 };
+  assert.equal((await validators.deployment_replicas(spec, ctx)).passed, true);
+  const result = await validators.deployment_replicas(
+    { ...spec, count: 5 },
+    ctx,
+  );
+  assert.equal(result.passed, false);
+  assert.match(result.message, /has 3 replica/);
+});
+
+test('deployment_ready_replicas reads status, not spec', async () => {
+  const deployment = { spec: { replicas: 3 }, status: { readyReplicas: 1 } };
+  const ctx = fakeCluster({ 'deployment/village/inn': deployment });
+  const spec = { namespace: 'village', name: 'inn', count: 3 };
+  assert.equal(
+    (await validators.deployment_ready_replicas(spec, ctx)).passed,
+    false,
+  );
+});
+
+test('service_exists checks port and workload selector', async () => {
+  const service = {
+    spec: { ports: [{ port: 80 }], selector: { app: 'inn' } },
+  };
+  const ctx = fakeCluster({ 'service/village/inn-service': service });
+  const spec = {
+    namespace: 'village',
+    name: 'inn-service',
+    port: 80,
+    target: 'inn',
+  };
+  assert.equal((await validators.service_exists(spec, ctx)).passed, true);
+  assert.equal(
+    (await validators.service_exists({ ...spec, port: 8080 }, ctx)).passed,
+    false,
+  );
+  assert.equal(
+    (await validators.service_exists({ ...spec, target: 'tavern' }, ctx))
+      .passed,
+    false,
+  );
+});
+
+test('configmap_value distinguishes missing keys from wrong values', async () => {
+  const configMap = { data: { GREETING: 'WelcomeHome' } };
+  const ctx = fakeCluster({ 'configmap/village/inn-config': configMap });
+  const spec = {
+    namespace: 'village',
+    name: 'inn-config',
+    key: 'GREETING',
+    value: 'WelcomeHome',
+  };
+  assert.equal((await validators.configmap_value(spec, ctx)).passed, true);
+  const wrongValue = await validators.configmap_value(
+    { ...spec, value: 'Hello' },
+    ctx,
+  );
+  assert.equal(wrongValue.passed, false);
+  assert.match(wrongValue.message, /expected Hello/);
+  const missingKey = await validators.configmap_value(
+    { ...spec, key: 'MOTD' },
+    ctx,
+  );
+  assert.match(missingKey.message, /no key/);
+});
+
+test('validateQuest aggregates objectives into the game contract', async () => {
+  const quest = {
+    id: 'village-02-pod',
+    objectives: [
+      {
+        id: 'pod',
+        validator: {
+          type: 'pod_exists',
+          namespace: 'village',
+          name: 'inn-lantern',
+          image: 'nginx',
+        },
+      },
+      {
+        id: 'port',
+        validator: {
+          type: 'container_port',
+          namespace: 'village',
+          pod: 'inn-lantern',
+          port: 80,
+        },
+      },
+    ],
+  };
+  const pod = {
+    spec: {
+      containers: [{ image: 'nginx', ports: [{ containerPort: 8080 }] }],
+    },
+  };
+  const ctx = fakeCluster({ 'pod/village/inn-lantern': pod });
+
+  const result = await validateQuest(quest, ctx);
+  assert.equal(result.questId, 'village-02-pod');
+  assert.equal(result.completed, false);
+  assert.deepEqual(
+    result.objectives.map((o) => o.passed),
+    [true, false],
+  );
+  assert.match(result.message, /1 objective/);
+});
+
+test('validateQuest reports completion when everything passes', async () => {
+  const quest = {
+    id: 'village-01-namespace',
+    objectives: [
+      {
+        id: 'namespace',
+        validator: { type: 'namespace_exists', name: 'village' },
+      },
+    ],
+  };
+  const ctx = fakeCluster({ 'namespace//village': {} });
+  const result = await validateQuest(quest, ctx);
+  assert.equal(result.completed, true);
+  assert.equal(result.message, null);
+});
+
+test('validateQuest survives kubectl failures and unknown validator types', async () => {
+  const quest = {
+    id: 'broken',
+    objectives: [
+      { id: 'boom', validator: { type: 'namespace_exists', name: 'village' } },
+      { id: 'what', validator: { type: 'time_travel' } },
+    ],
+  };
+  const ctx = fakeCluster({
+    'namespace//village': new Error('connection refused'),
+  });
+  const result = await validateQuest(quest, ctx);
+  assert.equal(result.completed, false);
+  assert.match(
+    result.objectives[0].message,
+    /Check failed: connection refused/,
+  );
+  assert.match(result.objectives[1].message, /Unknown validator type/);
+});
+
+test('every validator type used in K8sQuests.json is implemented', () => {
+  const used = new Set();
+  for (const quest of loadQuests().quests) {
+    for (const objective of quest.objectives || []) {
+      used.add(objective.validator?.type);
+    }
+  }
+  for (const type of used) {
+    assert.ok(
+      validators[type],
+      `missing validator implementation for "${type}"`,
+    );
+  }
+});

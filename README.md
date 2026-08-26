@@ -1,66 +1,84 @@
-# Kubernetes Isekai — Independent Rework
+# Kubernetes Isekai
 
-Kubernetes Isekai is an RPG that turns hands-on Kubernetes work into actions inside a game world: NPCs give quests, the player changes a real cluster, and the game progresses after the cluster state is validated.
+An RPG where the dungeon is a real Kubernetes cluster. NPCs hand out quests, the player answers them with `kubectl`, and the story only moves forward once the cluster actually reaches the requested state.
 
-This repository started from the game client created as a team academic project. The original grading backend was developed separately under supervisor guidance. This branch of the project is now being redesigned as an independent game-side implementation, with the long-term goal of making the RPG playable without depending on the original supervisor backend.
+Built with RPG Maker MV. Runs fully independently: the repository contains the game client, the quest engine and a local validator that inspects the cluster — no external grading backend required.
 
-## Current direction
+## Quick start
 
-The redesign treats Kubernetes as part of the world rather than as a quiz shown inside an RPG shell.
+Requirements: Node.js, `kubectl` configured against any cluster you are allowed to play in (minikube, kind, k3d all work).
 
-- Cluster → the world / kingdom
-- Namespace → a district or region
-- Pod → a worker, building or creature instance
-- Deployment → a managed guild or service
-- Service → a stable road or portal
-- ConfigMap → a public ledger / spellbook
-- Secret → a sealed record
-- Scaling → reinforcements
-- CrashLoopBackOff → a recurring curse or failed machine
-
-The first playable story arc is **Chapter 1: The Broken Village**. It progresses from namespaces and Pods to Deployments, scaling, Services and ConfigMaps, ending with a small integrated boss objective.
-
-## Architecture in this rework
-
-```text
-RPG Maker MV game
-    |
-    +-- K8sQuestEngine
-    |     +-- story / objectives
-    |     +-- quest progress in save data
-    |     +-- validator result contract
-    |
-    +-- NpcK8sPluginCommand
-          +-- independent local quest mode
-          +-- legacy backend compatibility mode
-
-Future independent validator
-    |
-    +-- Kubernetes API
-          +-- Namespace
-          +-- Pod
-          +-- Deployment
-          +-- Service
-          +-- ConfigMap
+```bash
+node validator/server.js
+# then open http://localhost:8787/
 ```
 
-The important change is that **game progression is no longer owned by the old grader protocol**. The game now has its own quest state and accepts a small validation-result contract. A future validator can therefore be replaced without rewriting maps and NPC events.
+The sidecar serves the game and validates quests against the cluster through your local kubeconfig. Talk to a quest NPC after doing the work in the cluster and they will check it for you, or use the `K8sQuest check` plugin command.
 
-## New quest engine
+To try the story without a cluster, open the game with `?questDev=1` and use the dev plugin commands below.
 
-Quest definitions live in:
+## How it plays
+
+Kubernetes is part of the world, not a quiz inside an RPG shell:
+
+| Cluster concept  | In the world                        |
+| ---------------- | ----------------------------------- |
+| Cluster          | the world / kingdom                 |
+| Namespace        | a district or region                |
+| Pod              | a worker, building or creature      |
+| Deployment       | a managed guild or service          |
+| Service          | a stable road or portal             |
+| ConfigMap        | a public ledger / spellbook         |
+| Secret           | a sealed record                     |
+| Scaling          | reinforcements                      |
+| CrashLoopBackOff | a recurring curse                   |
+
+### Chapter 1 — The Broken Village
+
+Each quest belongs to one NPC in the village. Everyone else will point you to whoever needs you next.
+
+| # | Quest                         | Quest giver            | Teaches                    |
+| - | ----------------------------- | ---------------------- | -------------------------- |
+| 1 | A Place to Rebuild            | Vivian, Quartermaster  | Namespaces                 |
+| 2 | Light the First Lantern       | Tek, Innkeeper         | Pods and container ports   |
+| 3 | Build Something That Survives | Noah, Engineer         | Deployments                |
+| 4 | The Night Rush                | Maya, Inn Steward      | Scaling                    |
+| 5 | Open the Road                 | Carl, Roadwright       | Services                   |
+| 6 | The Missing Ledger            | Lena, Archivist        | ConfigMaps                 |
+| 7 | Boss: Restore the Village     | Reno, Village Chief    | Integrated health check    |
+
+## Architecture
 
 ```text
-data/K8sQuests.json
+RPG Maker MV game (browser)
+    |
+    +-- K8sQuestEngine ......... story, quest state in save data,
+    |                            validation-result contract
+    +-- K8sValidatorClient ..... fetches results from the sidecar
+    +-- NpcK8sPluginCommand .... NPC bridge; legacy backend compatibility
+    |
+    v  HTTP (same origin by default)
+validator/server.js (Node, zero dependencies)
+    |
+    v  kubectl (local kubeconfig)
+Kubernetes cluster
 ```
 
-The game-side engine lives in:
+Game progression is owned by the game itself. The validator only reports a small result contract, so the checking side can be replaced without touching maps or NPC events:
 
-```text
-js/plugins/K8sQuestEngine.js
+```js
+K8sQuestEngine.applyValidationResult({
+  questId: 'village-04-scale',
+  completed: true,
+  objectives: [{ id: 'replicas', passed: true }],
+});
 ```
 
-Example objective definition:
+Results are only accepted for the quest that is currently active — an external component cannot complete the story out of order. Quest progress is stored in normal RPG Maker save files.
+
+### Quest definitions
+
+Quests live in `data/K8sQuests.json`. Objectives declare what to check, declaratively:
 
 ```json
 {
@@ -75,72 +93,74 @@ Example objective definition:
 }
 ```
 
-A validator only needs to return a result such as:
+The sidecar and the game read the same file, so story and validation cannot drift apart.
 
-```js
-K8sQuestEngine.applyValidationResult({
-  questId: 'village-04-scale',
-  completed: true,
-  objectives: [
-    { id: 'replicas', passed: true }
-  ]
-});
+### Validator sidecar
+
+`validator/server.js` needs only Node and `kubectl`:
+
+```bash
+node validator/server.js [--port 8787] [--kubectl /path/to/kubectl] [--api-only]
 ```
 
-This keeps Kubernetes checking separate from RPG story logic.
+| Endpoint                       | Purpose                                  |
+| ------------------------------ | ---------------------------------------- |
+| `GET /api/health`              | liveness check                           |
+| `GET /api/quests`              | quest definitions                        |
+| `GET /api/validate?questId=…`  | run the quest's checks, return contract  |
+| `GET /`                        | the game itself (unless `--api-only`)    |
+
+Supported validator types: `namespace_exists`, `pod_exists`, `container_port`, `deployment_exists`, `deployment_replicas`, `deployment_ready_replicas`, `service_exists`, `configmap_value`.
+
+The kubeconfig never reaches the browser; the game only ever sees pass/fail results.
 
 ## Running modes
 
-### Independent game mode
+| Mode        | How                                          | Validation source        |
+| ----------- | -------------------------------------------- | ------------------------ |
+| Independent | `node validator/server.js`, open the game    | local validator sidecar  |
+| Dev/story   | open with `?questDev=1`                      | manual plugin commands   |
+| Legacy      | open with `?baseUrl=…&apiKey=…&game=…`       | original grader backend  |
 
-Open the game without the old `baseUrl`, `apiKey` and `game` query parameters. Existing NPC events that call `NpcK8sPluginCommand` will fall back to the local quest engine instead of failing because the supervisor backend is missing.
+Useful URL parameters: `validatorUrl=<url>` points the game at a validator on another origin; `validator=0` disables cluster validation.
 
-Quest progress is stored in normal RPG Maker save data.
-
-### Legacy compatibility mode
-
-The original API flow remains available when all three legacy query parameters are supplied:
-
-```text
-?baseUrl=...&apiKey=...&game=...
-```
-
-This is kept only so the academic prototype can still be demonstrated while the independent validator is being built.
-
-### Quest development mode
-
-For story testing only, launch with:
-
-```text
-?questDev=1
-```
-
-RPG Maker plugin commands:
+Dev plugin commands (Event > Plugin Command):
 
 ```text
 K8sQuest status
-K8sQuest start village-01-namespace
-K8sQuest complete
-K8sQuest reset
+K8sQuest check
+K8sQuest start <questId>
+K8sQuest complete [questId]   # dev mode only
+K8sQuest reset                # dev mode only
 ```
 
-`complete` and `reset` are blocked outside development mode. In a normal game, quest completion must come from the Kubernetes validator.
+## Development
 
-## Chapter 1 — The Broken Village
+```bash
+npm test          # unit tests for quest engine, text wrapping and validators
+npm run validator # start the sidecar
+```
 
-1. **A Place to Rebuild** — Namespace
-2. **Light the First Lantern** — Pod + container port
-3. **Build Something That Survives** — Deployment
-4. **The Night Rush** — scaling to three replicas
-5. **Open the Road** — Service
-6. **The Missing Ledger** — ConfigMap
-7. **Boss: Restore the Village** — integrated health check
+Tests run on Node's built-in test runner with a small RPG Maker stub (`tests/mv-sandbox.js`) — no cluster and no browser needed.
 
-## Original academic project
+Project layout:
 
-The original project demonstrated a Web RPG connected to an AWS SAM grading backend and Kubernetes test rules:
+```text
+data/K8sQuests.json            quest and validator definitions
+js/plugins/K8sQuestEngine.js   quest state machine and NPC routing
+js/plugins/K8sValidatorClient.js  HTTP client for the sidecar
+js/plugins/NpcK8sPluginCommand.js NPC bridge + legacy compatibility
+validator/server.js            independent Kubernetes validator
+tests/                         unit tests
+python_tools/                  content-generation notebooks
+design/character_generator/    RPG Maker character generator presets
+```
+
+## Origins
+
+This project grew out of a team academic project (Higher Diploma in Cloud and Data Centre Administration): a Web RPG connected to an AWS SAM grading backend with Kubernetes test rules, developed under supervisor guidance:
 
 - Grader/backend: https://github.com/wongcyrus/k8s-grader
 - Kubernetes game rules: https://github.com/wongcyrus/k8s-game-rule
 
-Original game client contributors were students from the Higher Diploma in Cloud and Data Centre Administration programme. The independent rework intentionally keeps the original project attribution while separating new game-side work from the supervisor-developed backend.
+The legacy mode is kept so the original prototype can still be demonstrated. Everything else in this repository is an independent game-side implementation that runs without that backend.

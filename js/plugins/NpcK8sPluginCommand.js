@@ -10,14 +10,15 @@
 
 (function () {
   'use strict';
-  const wrapTextLength = 55;
+  const wrapTextWidth = 55; // in half-width character units; CJK counts as 2
+  const requestTimeoutMs = 15000;
   const urlParams = new URLSearchParams(window.location.search);
   const baseUrl = urlParams.get('baseUrl');
   const apiKey = urlParams.get('apiKey');
   const game = urlParams.get('game');
   const legacyMode = Boolean(baseUrl && apiKey && game);
   let lastResponse = null;
-  let callCount = 0;
+  let requestInFlight = false;
 
   const popitup = (url) => {
     window.open(url, 'name', 'scrollbars=1,resizable=1,width=1000,height=800');
@@ -25,25 +26,57 @@
     return false;
   };
 
+  const CJK_RE =
+    /[\u1100-\u11FF\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFFEF]/;
+
+  const unitWidth = (unit) => {
+    let width = 0;
+    for (const ch of unit) width += CJK_RE.test(ch) ? 2 : 1;
+    return width;
+  };
+
+  // Wraps by display width: CJK characters count as two units and may break
+  // anywhere, while runs of non-CJK text only break at spaces.
   const wrapText = (text) => {
-    const words = String(text || '').split(' ');
-    let wrappedText = '';
-    let currentLine = '';
-
-    for (const word of words) {
-      const potentialLine = currentLine + (currentLine ? ' ' : '') + word;
-      if (potentialLine.length <= wrapTextLength) {
-        currentLine = potentialLine;
-      } else {
-        wrappedText += (wrappedText ? '\n' : '') + currentLine;
-        currentLine = word;
+    const units = [];
+    for (const segment of String(text || '').split(/\s+/)) {
+      if (!segment) continue;
+      let run = '';
+      for (const ch of segment) {
+        if (CJK_RE.test(ch)) {
+          if (run) {
+            units.push({ text: run, spaceAfter: false });
+            run = '';
+          }
+          units.push({ text: ch, spaceAfter: false });
+        } else {
+          run += ch;
+        }
       }
+      if (run) units.push({ text: run, spaceAfter: false });
+      if (units.length) units[units.length - 1].spaceAfter = true;
     }
 
-    if (currentLine) {
-      wrappedText += (wrappedText ? '\n' : '') + currentLine;
+    const lines = [];
+    let line = '';
+    let lineWidth = 0;
+    let pendingSpace = false;
+
+    for (const unit of units) {
+      const width = unitWidth(unit.text);
+      const spaceWidth = pendingSpace ? 1 : 0;
+      if (line && lineWidth + spaceWidth + width > wrapTextWidth) {
+        lines.push(line);
+        line = unit.text;
+        lineWidth = width;
+      } else {
+        line += (pendingSpace ? ' ' : '') + unit.text;
+        lineWidth += spaceWidth + width;
+      }
+      pendingSpace = unit.spaceAfter;
     }
-    return wrappedText;
+    if (line) lines.push(line);
+    return lines.join('\n');
   };
 
   const callLocalQuest = (npcName) => {
@@ -54,32 +87,34 @@
     $gameMessage.add('Quest engine is not available.');
   };
 
-  const callLegacyApi = (npcName) => {
-    if (callCount === 0) {
-      $gameMessage.add('Hello!');
-    }
-    if (callCount > 0) {
-      let message = 'I am working on it now!';
-      if (lastResponse?.next_game_phrase) {
-        switch (lastResponse.next_game_phrase) {
-          case 'SETUP':
-            message = 'I am setting it up for you!';
-            break;
-          case 'READY':
-            message = 'I am making sure it is ready for the challenge!';
-            break;
-          case 'CHALLENGE':
-            message = 'I am running the challenge now!';
-            break;
-          case 'CHECK':
-            message = 'I am checking the game now!';
-            break;
-        }
+  const legacyBusyMessage = () => {
+    let message = 'I am working on it now!';
+    if (lastResponse?.next_game_phrase) {
+      switch (lastResponse.next_game_phrase) {
+        case 'SETUP':
+          message = 'I am setting it up for you!';
+          break;
+        case 'READY':
+          message = 'I am making sure it is ready for the challenge!';
+          break;
+        case 'CHALLENGE':
+          message = 'I am running the challenge now!';
+          break;
+        case 'CHECK':
+          message = 'I am checking the game now!';
+          break;
       }
-      $gameMessage.add(message);
+    }
+    return message;
+  };
+
+  const callLegacyApi = (npcName) => {
+    if (requestInFlight) {
+      $gameMessage.add(legacyBusyMessage());
       return;
     }
-    callCount++;
+    $gameMessage.add('Hello!');
+    requestInFlight = true;
 
     let url = `${baseUrl}/game-task?game=${encodeURIComponent(game)}&npc=${encodeURIComponent(npcName)}`;
     if (lastResponse?.next_game_phrase) {
@@ -88,10 +123,20 @@
 
     const xhr = new XMLHttpRequest();
     xhr.open('GET', url, true);
+    xhr.timeout = requestTimeoutMs;
     xhr.setRequestHeader('x-api-key', apiKey);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      callCount = 0;
+    xhr.onerror = function () {
+      requestInFlight = false;
+      $gameMessage.add('Sorry, I cannot connect to the legacy server.');
+    };
+    xhr.ontimeout = function () {
+      requestInFlight = false;
+      $gameMessage.add(
+        'The legacy server took too long to answer. Please try again.',
+      );
+    };
+    xhr.onload = function () {
+      requestInFlight = false;
 
       if (xhr.status !== 200) {
         $gameMessage.add('Sorry, I cannot connect to the legacy server.');
@@ -127,7 +172,8 @@
     callLegacyApi(npcName);
   };
 
-  const _Game_Interpreter_pluginCommand = Game_Interpreter.prototype.pluginCommand;
+  const _Game_Interpreter_pluginCommand =
+    Game_Interpreter.prototype.pluginCommand;
   Game_Interpreter.prototype.pluginCommand = function (command, args) {
     _Game_Interpreter_pluginCommand.call(this, command, args);
     if (command === 'NpcK8sPluginCommand') {
@@ -136,4 +182,7 @@
       callApi(npcName);
     }
   };
+
+  // Exposed for unit tests.
+  window.NpcK8sBridge = { wrapText: wrapText, isLegacyMode: () => legacyMode };
 })();

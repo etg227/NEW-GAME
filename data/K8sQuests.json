@@ -8,6 +8,8 @@
     {
       "id": "village-01-namespace",
       "title": "A Place to Rebuild",
+      "npc": "Vivian",
+      "role": "Quartermaster",
       "summary": "Create an isolated home for the damaged village services.",
       "intro": "The village is in chaos. Before anything can be rebuilt, the quartermaster needs a safe district where the recovery work can begin.",
       "hint": "Kubernetes groups related resources inside namespaces.",
@@ -19,11 +21,14 @@
         }
       ],
       "success": "A new boundary forms around the village. The rebuilding effort finally has a home.",
+      "done": "The district you founded is thriving. Every ledger I file now has a home.",
       "nextQuestId": "village-02-pod"
     },
     {
       "id": "village-02-pod",
       "title": "Light the First Lantern",
+      "npc": "Tek",
+      "role": "Innkeeper",
       "summary": "Bring the first village service online as a Pod.",
       "intro": "The new district is empty and dark. The innkeeper asks you to bring up a small nginx service so the village has its first working shelter.",
       "hint": "A Pod can run a container and expose a container port.",
@@ -31,20 +36,33 @@
         {
           "id": "pod",
           "text": "Create a Pod named inn-lantern in namespace village using nginx.",
-          "validator": { "type": "pod_exists", "namespace": "village", "name": "inn-lantern", "image": "nginx" }
+          "validator": {
+            "type": "pod_exists",
+            "namespace": "village",
+            "name": "inn-lantern",
+            "image": "nginx"
+          }
         },
         {
           "id": "port",
           "text": "Expose container port 80 on the Pod.",
-          "validator": { "type": "container_port", "namespace": "village", "pod": "inn-lantern", "port": 80 }
+          "validator": {
+            "type": "container_port",
+            "namespace": "village",
+            "pod": "inn-lantern",
+            "port": 80
+          }
         }
       ],
       "success": "Warm light spills from the inn. For the first time since the disaster, villagers gather indoors again.",
+      "done": "The lantern you lit still burns. Travellers find the inn every night.",
       "nextQuestId": "village-03-deployment"
     },
     {
       "id": "village-03-deployment",
       "title": "Build Something That Survives",
+      "npc": "Noah",
+      "role": "Engineer",
       "summary": "Replace the fragile one-off Pod with a managed Deployment.",
       "intro": "One lantern is not enough. The engineer warns that a single failure could throw the village back into darkness.",
       "hint": "Deployments keep the desired number of application replicas running.",
@@ -52,20 +70,33 @@
         {
           "id": "deployment",
           "text": "Create a Deployment named inn in namespace village using nginx.",
-          "validator": { "type": "deployment_exists", "namespace": "village", "name": "inn", "image": "nginx" }
+          "validator": {
+            "type": "deployment_exists",
+            "namespace": "village",
+            "name": "inn",
+            "image": "nginx"
+          }
         },
         {
           "id": "replicas",
           "text": "Run 1 replica of the inn Deployment.",
-          "validator": { "type": "deployment_replicas", "namespace": "village", "name": "inn", "count": 1 }
+          "validator": {
+            "type": "deployment_replicas",
+            "namespace": "village",
+            "name": "inn",
+            "count": 1
+          }
         }
       ],
       "success": "The inn is now maintained by the village watch. If one worker falls, another can take its place.",
+      "done": "The watch keeps the inn standing without me touching a thing. Fine work.",
       "nextQuestId": "village-04-scale"
     },
     {
       "id": "village-04-scale",
       "title": "The Night Rush",
+      "npc": "Maya",
+      "role": "Inn Steward",
       "summary": "Scale the inn to handle the returning population.",
       "intro": "Refugees arrive after sunset. One inn worker cannot serve everyone, and the queue stretches through the square.",
       "hint": "A Deployment can be scaled without rebuilding it from scratch.",
@@ -73,15 +104,23 @@
         {
           "id": "replicas",
           "text": "Scale the inn Deployment to 3 replicas.",
-          "validator": { "type": "deployment_replicas", "namespace": "village", "name": "inn", "count": 3 }
+          "validator": {
+            "type": "deployment_replicas",
+            "namespace": "village",
+            "name": "inn",
+            "count": 3
+          }
         }
       ],
       "success": "Three crews work in parallel. The queue disappears and the village square comes alive again.",
+      "done": "Three crews, no queue. The night rush is just a story we tell now.",
       "nextQuestId": "village-05-service"
     },
     {
       "id": "village-05-service",
       "title": "Open the Road",
+      "npc": "Carl",
+      "role": "Roadwright",
       "summary": "Give villagers a stable route to the inn replicas.",
       "intro": "The inn has three crews now, but villagers do not know which door will still exist tomorrow. A stable road is needed.",
       "hint": "A Service provides a stable network endpoint for a changing set of Pods.",
@@ -89,15 +128,24 @@
         {
           "id": "service",
           "text": "Create a Service named inn-service in namespace village that targets the inn workload on port 80.",
-          "validator": { "type": "service_exists", "namespace": "village", "name": "inn-service", "port": 80, "target": "inn" }
+          "validator": {
+            "type": "service_exists",
+            "namespace": "village",
+            "name": "inn-service",
+            "port": 80,
+            "target": "inn"
+          }
         }
       ],
       "success": "A permanent road sign appears in the square. Villagers can now find the inn no matter which crew is serving them.",
+      "done": "The road holds. Doors change, the sign does not.",
       "nextQuestId": "village-06-config"
     },
     {
       "id": "village-06-config",
       "title": "The Missing Ledger",
+      "npc": "Lena",
+      "role": "Archivist",
       "summary": "Restore configuration without baking it into the application image.",
       "intro": "The inn is running, but the rebuilt staff have forgotten the village greeting. The archivist insists that configuration belongs in a ledger, not inside the workers themselves.",
       "hint": "ConfigMaps separate non-secret configuration from container images.",
@@ -105,15 +153,24 @@
         {
           "id": "configmap",
           "text": "Create a ConfigMap named inn-config in namespace village with GREETING=WelcomeHome.",
-          "validator": { "type": "configmap_value", "namespace": "village", "name": "inn-config", "key": "GREETING", "value": "WelcomeHome" }
+          "validator": {
+            "type": "configmap_value",
+            "namespace": "village",
+            "name": "inn-config",
+            "key": "GREETING",
+            "value": "WelcomeHome"
+          }
         }
       ],
       "success": "The greeting returns to the inn ledger. The workers can change their message without being rebuilt.",
+      "done": "The ledger is safe in the archive, outside the workers. As it should be.",
       "nextQuestId": "village-07-boss"
     },
     {
       "id": "village-07-boss",
       "title": "Boss: Restore the Village",
+      "npc": "Reno",
+      "role": "Village Chief",
       "summary": "Prove that the village stack is healthy as one complete system.",
       "intro": "The storm returns. This time the village must survive without a hero holding every piece together by hand.",
       "hint": "Check desired replicas, ready replicas, Service routing and the configuration resources together.",
@@ -121,20 +178,38 @@
         {
           "id": "deployment-ready",
           "text": "Keep all 3 inn replicas ready.",
-          "validator": { "type": "deployment_ready_replicas", "namespace": "village", "name": "inn", "count": 3 }
+          "validator": {
+            "type": "deployment_ready_replicas",
+            "namespace": "village",
+            "name": "inn",
+            "count": 3
+          }
         },
         {
           "id": "service-ready",
           "text": "Keep inn-service available on port 80.",
-          "validator": { "type": "service_exists", "namespace": "village", "name": "inn-service", "port": 80, "target": "inn" }
+          "validator": {
+            "type": "service_exists",
+            "namespace": "village",
+            "name": "inn-service",
+            "port": 80,
+            "target": "inn"
+          }
         },
         {
           "id": "config-ready",
           "text": "Keep inn-config with GREETING=WelcomeHome.",
-          "validator": { "type": "configmap_value", "namespace": "village", "name": "inn-config", "key": "GREETING", "value": "WelcomeHome" }
+          "validator": {
+            "type": "configmap_value",
+            "namespace": "village",
+            "name": "inn-config",
+            "key": "GREETING",
+            "value": "WelcomeHome"
+          }
         }
       ],
       "success": "The storm passes. The village remains online. Chapter 1 is complete.",
+      "done": "The village stood through the storm because of you. This chapter of our history is written.",
       "nextQuestId": null
     }
   ]

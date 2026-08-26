@@ -6,18 +6,25 @@
  * Loads game-side quest definitions from data/K8sQuests.json and keeps
  * quest progress in the normal RPG Maker save file.
  *
+ * Each quest may declare an "npc" (and optional "role") in K8sQuests.json.
+ * A bound NPC gives, tracks and closes its own quest; every other NPC
+ * points the player towards the current quest giver.
+ *
  * Plugin commands:
  *   K8sQuest status
+ *   K8sQuest check                # ask the Kubernetes validator to re-check
  *   K8sQuest start <questId>
  *   K8sQuest complete [questId]   # dev mode only (?questDev=1)
  *   K8sQuest reset                # dev mode only (?questDev=1)
  *
- * A future Kubernetes validator should call:
+ * A Kubernetes validator (see validator/server.js) reports results with:
  *   K8sQuestEngine.applyValidationResult({
  *     questId: 'village-01-namespace',
  *     completed: true,
  *     objectives: [{ id: 'namespace', passed: true }]
  *   });
+ * Results are only accepted for the quest that is currently active, so an
+ * external component cannot complete the story out of order.
  */
 
 (function () {
@@ -56,6 +63,16 @@
     });
   }
 
+  function questForNpc(npcName) {
+    if (!npcName) return null;
+    var target = String(npcName).trim().toLowerCase();
+    return (
+      questList().find(function (quest) {
+        return quest.npc && String(quest.npc).trim().toLowerCase() === target;
+      }) || null
+    );
+  }
+
   function firstQuestId() {
     var quests = questList();
     return quests.length > 0 ? quests[0].id : null;
@@ -91,8 +108,22 @@
     return state ? findQuest(state.currentQuestId) : null;
   }
 
+  function isCompleted(questId) {
+    var state = ensureState();
+    return Boolean(state) && state.completedQuestIds.indexOf(questId) !== -1;
+  }
+
   function addMessage(text) {
     if (text && $gameMessage) $gameMessage.add(text);
+  }
+
+  function npcLabel(name, role) {
+    if (!name) return '';
+    return '\\c[4]' + name + (role ? ' \u2014 ' + role : '') + '\\c[0]';
+  }
+
+  function questGiverLabel(quest) {
+    return quest && quest.npc ? npcLabel(quest.npc, quest.role) : '';
   }
 
   function objectiveResult(questId, objectiveId) {
@@ -106,7 +137,8 @@
 
     quest.objectives.forEach(function (objective) {
       var result = objectiveResult(quest.id, objective.id);
-      var marker = result && result.passed ? '\\c[3]✓\\c[0]' : '\\c[6]•\\c[0]';
+      var marker =
+        result && result.passed ? '\\c[3]\u2713\\c[0]' : '\\c[6]\u2022\\c[0]';
       addMessage(marker + ' ' + objective.text);
     });
   }
@@ -165,7 +197,9 @@
     }
 
     if (source !== 'validator' && !devMode) {
-      addMessage('Quest completion must be confirmed by the Kubernetes validator.');
+      addMessage(
+        'Quest completion must be confirmed by the Kubernetes validator.',
+      );
       return false;
     }
 
@@ -178,7 +212,12 @@
 
     if (quest.nextQuestId && findQuest(quest.nextQuestId)) {
       state.currentQuestId = quest.nextQuestId;
-      addMessage('A new quest has become available.');
+      var next = findQuest(quest.nextQuestId);
+      if (next && next.npc) {
+        addMessage('A new quest awaits. Speak with ' + next.npc + '.');
+      } else {
+        addMessage('A new quest has become available.');
+      }
     } else {
       state.currentQuestId = null;
       addMessage('Chapter complete.');
@@ -198,6 +237,29 @@
       return false;
     }
 
+    var state = ensureState();
+
+    if (isCompleted(result.questId)) {
+      setObjectiveResults(result.questId, result.objectives || []);
+      if (result.message) addMessage(result.message);
+      return true;
+    }
+
+    if (
+      state &&
+      state.currentQuestId &&
+      result.questId !== state.currentQuestId
+    ) {
+      console.warn(
+        'K8sQuestEngine: rejected out-of-order validation for ' +
+          result.questId +
+          ' (current quest is ' +
+          state.currentQuestId +
+          ')',
+      );
+      return false;
+    }
+
     setObjectiveResults(result.questId, result.objectives || []);
 
     if (result.message) addMessage(result.message);
@@ -209,25 +271,100 @@
     return true;
   }
 
-  function interact(npcName) {
+  function validatorAvailable() {
+    return Boolean(
+      window.K8sValidatorClient && window.K8sValidatorClient.isEnabled(),
+    );
+  }
+
+  function showStatusWithHint(quest) {
+    showStatus();
+    if (quest && quest.hint) addMessage('Hint: ' + quest.hint);
+  }
+
+  function checkCurrentQuest() {
     var quest = currentQuest();
     if (!quest) {
-      addMessage('The village is peaceful for now. There are no new quests.');
+      addMessage('No Kubernetes quest is currently available.');
       return;
     }
+    if (validatorAvailable()) {
+      window.K8sValidatorClient.checkQuest(quest.id, function () {
+        showStatusWithHint(quest);
+      });
+    } else {
+      showStatusWithHint(quest);
+    }
+  }
 
+  function handleActiveQuest(quest, npcName) {
     var state = ensureState();
     var started = state.startedQuestIds.indexOf(quest.id) !== -1;
 
+    addMessage(quest.npc ? questGiverLabel(quest) : npcLabel(npcName));
+
     if (!started) {
-      if (npcName) addMessage('\\c[4]' + npcName + '\\c[0]');
       startQuest(quest.id);
       return;
     }
 
-    if (npcName) addMessage('\\c[4]' + npcName + '\\c[0]');
-    showStatus();
-    if (quest.hint) addMessage('Hint: ' + quest.hint);
+    if (validatorAvailable()) {
+      addMessage('Let me take a look at the cluster...');
+      window.K8sValidatorClient.checkQuest(quest.id, function () {
+        showStatusWithHint(quest);
+      });
+    } else {
+      showStatusWithHint(quest);
+    }
+  }
+
+  function interact(npcName) {
+    var quest = currentQuest();
+    var bound = questForNpc(npcName);
+
+    if (bound) {
+      if (isCompleted(bound.id)) {
+        addMessage(questGiverLabel(bound));
+        addMessage(bound.done || 'Thank you again for your help, hero.');
+        if (quest && quest.npc && quest.id !== bound.id) {
+          addMessage('I hear ' + quest.npc + ' could use a hand next.');
+        }
+        return;
+      }
+
+      if (quest && bound.id === quest.id) {
+        handleActiveQuest(quest, npcName);
+        return;
+      }
+
+      addMessage(questGiverLabel(bound));
+      addMessage(
+        bound.locked ||
+          'I will need your help soon, but the village is not ready for that work yet.',
+      );
+      if (quest && quest.npc) {
+        addMessage('For now, ' + quest.npc + ' is the one waiting for you.');
+      }
+      return;
+    }
+
+    if (!quest) {
+      addMessage(npcLabel(npcName));
+      addMessage('The village is peaceful for now. There are no new quests.');
+      return;
+    }
+
+    if (!quest.npc) {
+      handleActiveQuest(quest, npcName);
+      return;
+    }
+
+    addMessage(npcLabel(npcName));
+    addMessage(
+      'Busy days in the village. If you are looking for work, talk to ' +
+        quest.npc +
+        '.',
+    );
   }
 
   function resetState() {
@@ -240,7 +377,8 @@
     addMessage('Kubernetes quest progress has been reset.');
   }
 
-  var _Game_Interpreter_pluginCommand = Game_Interpreter.prototype.pluginCommand;
+  var _Game_Interpreter_pluginCommand =
+    Game_Interpreter.prototype.pluginCommand;
   Game_Interpreter.prototype.pluginCommand = function (command, args) {
     _Game_Interpreter_pluginCommand.call(this, command, args);
     if (command !== 'K8sQuest') return;
@@ -249,6 +387,7 @@
     var questId = args[1];
 
     if (action === 'status') showStatus();
+    if (action === 'check') checkCurrentQuest();
     if (action === 'start') startQuest(questId || firstQuestId());
     if (action === 'complete') completeQuest(questId, 'dev');
     if (action === 'reset') resetState();
@@ -256,6 +395,7 @@
 
   window.K8sQuestEngine = {
     applyValidationResult: applyValidationResult,
+    checkCurrentQuest: checkCurrentQuest,
     completeQuest: function (questId) {
       return completeQuest(questId, 'validator');
     },
@@ -264,6 +404,7 @@
     isDevMode: function () {
       return devMode;
     },
+    questForNpc: questForNpc,
     showStatus: showStatus,
     startQuest: startQuest,
   };
