@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "comment": "Chapter 1 presentation rules. These are deliberately separate from quest validation so maps can be redesigned without changing Kubernetes logic.",
+  "maps": {
+    "8": {
+      "visibility": [
+        { "eventId": 1, "switchId": 12, "label": "inn flame west" },
+        { "eventId": 2, "switchId": 12, "label": "inn flame north" },
+        { "eventId": 8, "switchId": 11, "label": "Tek" },
+        { "eventId": 12, "switchId": 12, "label": "Noah" },
+        { "eventId": 10, "switchId": 13, "label": "Maya" },
+        { "eventId": 11, "switchId": 14, "label": "Carl" },
+        { "eventId": 6, "switchId": 14, "label": "returning villager" },
+        { "eventId": 5, "switchId": 15, "label": "Lena" },
+        { "eventId": 9, "switchId": 16, "label": "Reno" }
+      ],
+      "wander": [
+        { "eventId": 6, "switchId": 14, "moveSpeed": 3 }
+      ],
+      "celebrate": {
+        "switchId": 17,
+        "eventIds": [4, 5, 6, 7, 8, 9, 10, 11, 12]
+      }
+    },
+    "3": {
+      "blockedEvents": [
+        {
+          "eventIds": [4, 5, 6],
+          "untilSwitchId": 15,
+          "label": "forest road",
+          "message": "The forest road is still cut off. Carl said the village Service must be restored before this route can open."
+        }
+      ]
+    }
+  }
+}
